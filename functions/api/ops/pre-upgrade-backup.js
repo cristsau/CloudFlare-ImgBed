@@ -1,4 +1,4 @@
-import { checkDatabaseConfig } from "../../../utils/databaseAdapter.js";
+import { checkDatabaseConfig } from "../../utils/databaseAdapter.js";
 
 const BACKUP_TOKEN_SHA256 =
   "b41b2ba126c2cca97c35cb51ec33b16d8059c6e5ac1a9cb44ad9a5c0c6fcc6a0";
