@@ -1,0 +1,40 @@
+name: CloudFlare-ImgBed checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Validate dependency lock
+        run: npm ci --ignore-scripts --omit=optional
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          find functions deploy -type f -name '*.js' -print0 \
+            | xargs -0 -n1 node --check
+
+      - name: Verify Pages root compatibility mirror
+        shell: bash
+        run: |
+          for path in frontend-dist/*; do
+            diff -qr "$path" "$(basename "$path")"
+          done
