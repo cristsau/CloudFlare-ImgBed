@@ -1,5 +1,3 @@
-import { checkDatabaseConfig } from "../../utils/databaseAdapter.js";
-
 const BACKUP_TOKEN_SHA256 =
   "b41b2ba126c2cca97c35cb51ec33b16d8059c6e5ac1a9cb44ad9a5c0c6fcc6a0";
 
@@ -111,12 +109,14 @@ export async function onRequest(context) {
     return jsonResponse({ error: "Unauthorized" }, 401);
   }
 
-  const database = checkDatabaseConfig(context.env);
   let data;
 
-  if (database.usingKV) {
+  if (context.env.img_url && typeof context.env.img_url.list === "function") {
     data = await backupKv(context.env.img_url);
-  } else if (database.usingD1) {
+  } else if (
+    context.env.img_d1 &&
+    typeof context.env.img_d1.prepare === "function"
+  ) {
     data = await backupD1(context.env.img_d1);
   } else {
     return jsonResponse({ error: "Database not configured" }, 503);
