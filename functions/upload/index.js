@@ -12,7 +12,7 @@ import {
 } from "./uploadTools";
 import { initializeChunkedUpload, handleChunkUpload, uploadLargeFileToTelegram, handleCleanupRequest } from "./chunkUpload";
 import { handleChunkMerge } from "./chunkMerge";
-import { TelegramAPI } from "../utils/storage/telegramAPI";
+import { applyTelegramUploadIdentity, TelegramAPI } from "../utils/storage/telegramAPI";
 import { DiscordAPI } from "../utils/storage/discordAPI";
 import { HuggingFaceAPI } from "../utils/storage/huggingfaceAPI";
 import { WebDAVAPI } from "../utils/storage/webdavAPI";
@@ -560,7 +560,7 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
             metadata.Channel = "TelegramNew";
             metadata.ChannelName = tgChannel.name;
 
-            metadata.TgFileId = id;
+            applyTelegramUploadIdentity(metadata, fileInfo, tgChatId);
             await db.put(fullId, "", {
                 metadata: metadata,
             });
@@ -666,6 +666,7 @@ async function uploadFileToDiscord(context, fullId, metadata, returnLink) {
         metadata.ChannelName = discordChannel.name || "Discord_env";
         metadata.FileSize = (fileInfo.file_size / 1024 / 1024).toFixed(2);
         metadata.DiscordMessageId = fileInfo.message_id;
+        metadata.DiscordChannelId = String(discordChannel.channelId);
         // 注意：不存储 DiscordAttachmentUrl，因为 Discord 附件 URL 会在约24小时后过期
         // 读取时会通过 API 获取新的 URL
 

@@ -1,6 +1,8 @@
 /**
  * Telegram API 封装类
  */
+export const TELEGRAM_DELETE_CAPABILITY = 'telegram-message-v1';
+
 export class TelegramAPI {
     constructor(botToken, proxyUrl = '') {
         this.botToken = botToken;
@@ -61,6 +63,7 @@ export class TelegramAPI {
             file_id: file.file_id,
             file_name: file.file_name || file.file_unique_id,
             file_size: file.file_size,
+            message_id: responseData.result.message_id,
         });
 
         try {
@@ -139,4 +142,63 @@ export class TelegramAPI {
         return response;
     }
 
+    /**
+     * Delete the Telegram message that owns an uploaded file.
+     *
+     * Telegram does not expose file deletion by file_id. The message_id returned
+     * by sendPhoto/sendDocument/etc. must therefore be retained at upload time.
+     * A missing message is treated as idempotently deleted; permission, channel,
+     * rate-limit and transport failures remain hard failures.
+     */
+    async deleteMessage(chatId, messageId) {
+        try {
+            const response = await fetch(`${this.baseURL}/deleteMessage`, {
+                method: 'POST',
+                headers: {
+                    ...this.defaultHeaders,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    chat_id: chatId,
+                    message_id: messageId,
+                }),
+            });
+
+            let responseData = null;
+            try {
+                responseData = await response.json();
+            } catch {
+                responseData = null;
+            }
+
+            if (response.ok && responseData?.ok === true && responseData?.result === true) {
+                return { deleted: true, missing: false, nonDeletable: false };
+            }
+
+            const description = String(responseData?.description || '').toLowerCase();
+            if (response.status === 400 && /message(?: to delete)? not found/.test(description)) {
+                return { deleted: true, missing: true, nonDeletable: false };
+            }
+
+            const nonDeletable = response.status === 400
+                && /message (?:can'?t|cannot|can not) be deleted/.test(description);
+
+            console.error('Telegram deleteMessage failed:', response.status, {
+                nonDeletable,
+            });
+            return { deleted: false, missing: false, nonDeletable };
+        } catch (error) {
+            console.error('Telegram deleteMessage request failed:', error.message);
+            return { deleted: false, missing: false, nonDeletable: false };
+        }
+    }
+
+}
+
+export function applyTelegramUploadIdentity(metadata, fileInfo, chatId) {
+    metadata.TgFileId = fileInfo.file_id;
+    metadata.TgMessageId = fileInfo.message_id;
+    metadata.TgChatId = String(chatId);
+    metadata.DeleteCapability = TELEGRAM_DELETE_CAPABILITY;
+    return metadata;
 }

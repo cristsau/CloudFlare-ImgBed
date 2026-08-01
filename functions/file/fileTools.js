@@ -54,6 +54,26 @@ export const FILE_CACHE_CONTROL = {
     NO_STORE: 'private, no-store, max-age=0',
 };
 
+// NAV 笔记图片需要支持撤销访问。禁止浏览器/CDN 长时间缓存，避免
+// 删除元数据后旧的 /file URL 仍可在 30 天缓存窗口内读取。
+export function resolveFileCacheControl(fileId, fallback = FILE_CACHE_CONTROL.PUBLIC) {
+    const normalizedPath = String(fileId || '').replace(/^\/+/, '');
+    if (normalizedPath === 'nav-notes' || normalizedPath.startsWith('nav-notes/')) {
+        return FILE_CACHE_CONTROL.NO_STORE;
+    }
+    return fallback || FILE_CACHE_CONTROL.PUBLIC;
+}
+
+export function buildExternalRedirectResponse(externalLink, fileId, fallbackCacheControl) {
+    return new Response(null, {
+        status: 302,
+        headers: {
+            Location: externalLink,
+            'Cache-Control': resolveFileCacheControl(fileId, fallbackCacheControl),
+        },
+    });
+}
+
 // 公共响应头设置函数
 export function setCommonHeaders(headers, encodedFileName, fileType, cacheControl = FILE_CACHE_CONTROL.PUBLIC) {
     headers.set('Content-Disposition', `inline; filename="${encodedFileName}"; filename*=UTF-8''${encodedFileName}`);

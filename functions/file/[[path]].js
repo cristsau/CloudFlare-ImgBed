@@ -6,7 +6,8 @@ import { HuggingFaceAPI } from "../utils/storage/huggingfaceAPI";
 import { buildWebDAVUrl, WebDAVAPI } from "../utils/storage/webdavAPI";
 import {
     setCommonHeaders, setRangeHeaders, handleHeadRequest, getFileContent, isTgChannel,
-    returnWithCheck, return404, returnBlockImg, isDomainAllowed, FILE_CACHE_CONTROL
+    returnWithCheck, return404, returnBlockImg, isDomainAllowed, FILE_CACHE_CONTROL,
+    buildExternalRedirectResponse, resolveFileCacheControl
 } from './fileTools';
 import { getDatabase } from '../utils/databaseAdapter.js';
 import { authenticate, AUTH_SCOPE } from '../utils/auth/authCore.js';
@@ -50,6 +51,7 @@ export async function onRequest(context) {  // Contents of context object
     context.Referer = Referer;
 
     context.fileAccess = await buildFileAccessContext(context);
+    context.fileId = fileId;
 
     // 检查引用域名是否被允许
     if (!isDomainAllowed(context)) {
@@ -109,8 +111,13 @@ export async function onRequest(context) {  // Contents of context object
 
     /* 外链渠道 */
     if (imgRecord.metadata?.Channel === 'External') {
-        // 直接重定向到外链
-        return Response.redirect(imgRecord.metadata?.ExternalLink, 302);
+        // 直接重定向到外链；NAV 笔记路径仍须服从 no-store，不能让
+        // redirect 绕过统一的可撤销缓存策略。
+        return buildExternalRedirectResponse(
+            imgRecord.metadata?.ExternalLink,
+            fileId,
+            context.fileAccess?.cacheControl
+        );
     }
 
     /* Telegram及Telegraph渠道 */
@@ -198,7 +205,7 @@ async function buildFileAccessContext(context) {
 }
 
 function getFileCacheControl(context) {
-    return context.fileAccess?.cacheControl;
+    return resolveFileCacheControl(context.fileId, context.fileAccess?.cacheControl);
 }
 
 function getChunkedFileCacheControl(context) {

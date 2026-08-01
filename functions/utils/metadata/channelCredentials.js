@@ -43,7 +43,9 @@ export async function resolveTelegramCredentials(db, env, metadata = {}) {
     return {
       source: 'config',
       botToken: channel.botToken,
-      chatId: channel.chatId,
+      // Prefer the chat persisted with the upload. A channel may later be
+      // reconfigured to another chat while old messages still need deletion.
+      chatId: metadata.TgChatId || channel.chatId,
       proxyUrl: channel.proxyUrl || '',
       fileId: metadata.TgFileId,
     };
@@ -51,7 +53,7 @@ export async function resolveTelegramCredentials(db, env, metadata = {}) {
 
   return missingCredentials({
     botToken: '',
-    chatId: '',
+    chatId: metadata.TgChatId || '',
     proxyUrl: '',
     fileId: metadata.TgFileId,
   });
@@ -64,7 +66,7 @@ export async function resolveDiscordCredentials(db, env, metadata = {}) {
     return {
       source: 'config',
       botToken: channel.botToken,
-      channelId: channel.channelId,
+      channelId: metadata.DiscordChannelId || channel.channelId,
       proxyUrl: channel.proxyUrl || '',
       messageId: metadata.DiscordMessageId,
     };
@@ -72,7 +74,7 @@ export async function resolveDiscordCredentials(db, env, metadata = {}) {
 
   return missingCredentials({
     botToken: '',
-    channelId: '',
+    channelId: metadata.DiscordChannelId || '',
     proxyUrl: '',
     messageId: metadata.DiscordMessageId,
   });
