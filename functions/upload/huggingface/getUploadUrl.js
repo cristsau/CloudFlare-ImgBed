@@ -12,8 +12,18 @@
 
 import { HuggingFaceAPI } from '../../utils/storage/huggingfaceAPI.js';
 import { fetchUploadConfig } from '../../utils/sysConfig.js';
-import { userAuthCheck, UnauthorizedResponse } from '../../utils/auth/userAuth.js';
+import { UnauthorizedResponse } from '../../utils/auth/userAuth.js';
+import { authenticate, AUTH_SCOPE } from '../../utils/auth/authCore.js';
+import {
+    authorizeUploadFolder,
+    writeCanonicalUploadFolder,
+} from '../../utils/auth/uploadPolicy.js';
+import { getDatabase } from '../../utils/databaseAdapter.js';
 import { buildUniqueFileId, getUploadIp, isBlockedUploadIp, createResponse } from '../uploadTools.js';
+import {
+    createHuggingFaceUploadGrant,
+    isHuggingFaceDirectUploadAllowed,
+} from './uploadGrant.js';
 
 export async function onRequestPost(context) {
     const { request, env } = context;
@@ -23,8 +33,25 @@ export async function onRequestPost(context) {
     try {
         // 鉴权
         const requiredPermission = 'upload';
-        if (!await userAuthCheck(env, url, request, requiredPermission)) {
+        const authResult = await authenticate({
+            env,
+            request,
+            url,
+            requiredPermission,
+            authScope: AUTH_SCOPE.USER,
+        });
+        if (!authResult.authorized) {
             return UnauthorizedResponse('Unauthorized');
+        }
+        context.data = context.data || {};
+        context.data.auth = authResult;
+        if (!isHuggingFaceDirectUploadAllowed(authResult)) {
+            return createResponse(JSON.stringify({
+                error: 'API tokens must use the standard upload endpoint'
+            }), {
+                status: 403,
+                headers: { 'Content-Type': 'application/json' }
+            });
         }
 
         // 检查上传IP是否被封禁
@@ -45,6 +72,17 @@ export async function onRequestPost(context) {
                 error: 'Missing required fields: fileSize, fileName, sha256, fileSample'
             }), {
                 status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+
+        let canonicalFolder;
+        try {
+            canonicalFolder = authorizeUploadFolder(authResult, uploadFolder || '');
+            writeCanonicalUploadFolder(url, canonicalFolder);
+        } catch {
+            return createResponse(JSON.stringify({ error: 'Invalid or unauthorized upload path' }), {
+                status: 403,
                 headers: { 'Content-Type': 'application/json' }
             });
         }
@@ -101,6 +139,14 @@ export async function onRequestPost(context) {
         const uploadInfo = await huggingfaceAPI.getLfsUploadInfo(fileSize, filePath, sha256, fileSample);
         rewriteMultipartCompletionUrl(url, uploadInfo);
 
+        await createHuggingFaceUploadGrant(getDatabase(env), authResult, {
+            fullId,
+            filePath,
+            sha256,
+            fileSize,
+            channelName: hfChannel.name || '',
+        });
+
         // 返回上传信息
         return createResponse(JSON.stringify({
             success: true,
@@ -117,7 +163,7 @@ export async function onRequestPost(context) {
 
     } catch (error) {
         console.error('getUploadUrl error:', error.message);
-        return createResponse(JSON.stringify({ error: error.message }), {
+        return createResponse(JSON.stringify({ error: 'Internal server error' }), {
             status: 500,
             headers: { 'Content-Type': 'application/json' }
         });

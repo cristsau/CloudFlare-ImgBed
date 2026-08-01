@@ -11,6 +11,8 @@ import {
     resolveS3Credentials,
     resolveWebDAVCredentials,
 } from '../../../utils/metadata/channelCredentials.js';
+import { isPathAllowedForToken, normalizeResourcePath } from '../../../utils/auth/tokenPolicy.js';
+import { isMissingStoredFile } from '../../../utils/deletePolicy.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -24,15 +26,17 @@ export async function onRequest(context) {
     const { request, env, params, waitUntil } = context;
 
     const url = new URL(request.url);
+    const requestPolicyError = validateDeleteRequestPolicy(context, url);
+    if (requestPolicyError) return requestPolicyError;
 
     // 读取folder参数，判断是否为文件夹删除请求
     const folder = url.searchParams.get('folder');
     if (folder === 'true') {
         try {
-            params.path = decodeURIComponent(params.path);
+            const folderPath = resolveDeletePath(params.path);
             // 使用队列存储需要处理的文件夹
             const folderQueue = [{
-                path: params.path.split(',').join('/')
+                path: folderPath
             }];
 
             const deletedFiles = [];
@@ -42,7 +46,9 @@ export async function onRequest(context) {
                 const currentFolder = folderQueue.shift();
 
                 // 获取指定目录下的所有文件
-                const listUrl = new URL(`${url.origin}/api/manage/list?count=-1&dir=${currentFolder.path}`);
+                const listUrl = new URL('/api/manage/list', url.origin);
+                listUrl.searchParams.set('count', '-1');
+                listUrl.searchParams.set('dir', currentFolder.path);
                 const listRequest = new Request(listUrl, {
                     headers: request.headers,
                 });
@@ -54,6 +60,10 @@ export async function onRequest(context) {
                 // 处理当前文件夹下的所有文件
                 for (const file of files) {
                     const fileId = file.name;
+                    if (!canTokenAccessDeletePath(context, fileId)) {
+                        failedFiles.push(fileId);
+                        continue;
+                    }
                     const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
                     const success = await deleteFile(env, fileId, cdnUrl, url);
@@ -67,6 +77,9 @@ export async function onRequest(context) {
                 // 将子文件夹添加到队列
                 const directories = listData.directories;
                 for (const dir of directories) {
+                    if (!canTokenAccessDeletePath(context, dir)) {
+                        continue;
+                    }
                     folderQueue.push({
                         path: dir
                     });
@@ -99,9 +112,7 @@ export async function onRequest(context) {
 
     // 单个文件删除处理
     try {
-        // 解码params.path
-        params.path = decodeURIComponent(params.path);
-        const fileId = params.path.split(',').join('/');
+        const fileId = resolveDeletePath(params.path);
         const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
         const success = await deleteFile(env, fileId, cdnUrl, url);
@@ -129,6 +140,67 @@ export async function onRequest(context) {
     }
 }
 
+export function resolveDeletePath(pathParam) {
+    const rawPath = Array.isArray(pathParam)
+        ? pathParam.join('/')
+        : String(pathParam || '').split(',').join('/');
+    return normalizeResourcePath(rawPath);
+}
+
+export function validateDeleteRequestPolicy(context, url) {
+    const auth = context.data?.auth;
+    if (!auth?.authorized) {
+        return new Response('Unauthorized', { status: 401 });
+    }
+
+    const isApiToken = auth.credentialType === 'apiToken';
+    if (isApiToken && context.request.method !== 'DELETE') {
+        return new Response('Method not allowed', {
+            status: 405,
+            headers: { 'Allow': 'DELETE, OPTIONS', 'Cache-Control': 'no-store' },
+        });
+    }
+
+    if (!isApiToken && !['GET', 'DELETE'].includes(context.request.method)) {
+        return new Response('Method not allowed', {
+            status: 405,
+            headers: { 'Allow': 'GET, DELETE, OPTIONS', 'Cache-Control': 'no-store' },
+        });
+    }
+
+    if (isApiToken && url.searchParams.get('folder') === 'true') {
+        const canDeleteFolder = auth.token.permissions.includes('manage')
+            && auth.token.allowFolderDelete === true;
+        if (!canDeleteFolder) {
+            return new Response('Forbidden: token cannot delete folders', { status: 403 });
+        }
+    }
+
+    if (isApiToken) {
+        try {
+            const fileId = resolveDeletePath(context.params?.path);
+            if (!isPathAllowedForToken(auth.token, fileId)) {
+                throw new TypeError('Path outside token scope');
+            }
+        } catch {
+            return new Response('Forbidden: invalid or unauthorized delete path', { status: 403 });
+        }
+    }
+
+    return null;
+}
+
+function canTokenAccessDeletePath(context, fileId) {
+    const auth = context.data?.auth;
+    if (auth?.credentialType !== 'apiToken') return true;
+
+    try {
+        return isPathAllowedForToken(auth.token, resolveDeletePath(fileId));
+    } catch {
+        return false;
+    }
+}
+
 // 删除单个文件的核心函数
 async function deleteFile(env, fileId, cdnUrl, url) {
     try {
@@ -137,7 +209,7 @@ async function deleteFile(env, fileId, cdnUrl, url) {
         const img = await db.getWithMetadata(fileId);
 
         // 如果文件记录不存在，直接返回成功（幂等删除）
-        if (!img) {
+        if (isMissingStoredFile(img)) {
             console.warn(`File ${fileId} not found in database, skipping delete`);
             return true;
         }

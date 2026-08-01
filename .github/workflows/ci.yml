@@ -32,6 +32,9 @@ jobs:
           find functions deploy -type f -name '*.js' -print0 \
             | xargs -0 -n1 node --check
 
+      - name: Run security policy tests
+        run: node --test test/*.test.js
+
       - name: Verify Pages root compatibility mirror
         shell: bash
         run: |

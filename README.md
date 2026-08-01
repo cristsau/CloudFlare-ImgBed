@@ -34,6 +34,10 @@
 
 CloudFlare-ImgBed is an open-source file hosting solution compatible with both Docker and Serverless dual-stack deployments, featuring support for multiple backend storage channels. It not only provides fundamental features covering the entire file lifecycle—such as **uploading**, **managing**, **reading**, and **deleting**—but also offers advanced capabilities including **authentication**, **directory organization**, **content moderation**, and **random images**. Supported by a comprehensive RESTful API and WebDAV integration, it is perfectly suited for self-hosted image hosting, static site asset management, and lightweight file distribution scenarios. You can see [Feature Docs](https://cfbed.sanyue.de/en/guide/features.html) for details.
 
+> [!WARNING]
+>
+> Production deployments must configure an administrator username or password; management APIs and administrator login fail closed when both are absent. Credential-free local development remains available only when `dev_mode=true` is set explicitly. Restricted API tokens may use `allowedPrefixes`; legacy tokens without that field retain their original unrestricted path access and should be rotated deliberately. API tokens must use the standard `/upload` endpoint; HuggingFace browser-direct uploads remain limited to interactive first-party sessions because KV cannot atomically consume a one-time upload grant.
+
 ![CloudFlare](readme/海报.png)
 
 # 2. [Document](https://cfbed.sanyue.de/en)

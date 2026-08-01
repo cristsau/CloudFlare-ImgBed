@@ -21,8 +21,25 @@ export const AUTH_SCOPE = {
     EITHER: 'either',
 };
 
-const AUTHORIZED = (authType) => ({ authorized: true, authType });
-const UNAUTHORIZED = { authorized: false, authType: null };
+const AUTHORIZED = (authType, details = {}) => ({
+    authorized: true,
+    authType,
+    ...details,
+});
+const unauthorized = (error = null) => ({
+    authorized: false,
+    authType: null,
+    credentialType: null,
+    error,
+});
+
+/**
+ * Development bypasses must be explicit. Production and unlabelled
+ * environments fail closed when administrator credentials are absent.
+ */
+export function isExplicitDevelopmentMode(env) {
+    return env?.dev_mode === 'true';
+}
 
 /**
  * 管理员会话认证
@@ -33,12 +50,17 @@ const UNAUTHORIZED = { authorized: false, authType: null };
  */
 async function checkAdmin({ env, request, adminConfigured }) {
     if (!adminConfigured) {
-        return AUTHORIZED('admin'); // 未配置管理员认证，视为管理员身份放行
+        return isExplicitDevelopmentMode(env)
+            ? AUTHORIZED('admin', { credentialType: 'developmentBypass' })
+            : null;
     }
 
     const session = await validateSession(env, request, 'admin');
     if (session.valid) {
-        return AUTHORIZED('admin');
+        return AUTHORIZED('admin', {
+            credentialType: 'adminSession',
+            session: session.session,
+        });
     }
 
     return null;
@@ -55,28 +77,34 @@ async function checkUser({ env, request, url, authCodeConfigured, userAuthCode }
     // admin session（管理员身份也可访问用户资源）
     const adminSession = await validateSession(env, request, 'admin');
     if (adminSession.valid) {
-        return AUTHORIZED('admin');
+        return AUTHORIZED('admin', {
+            credentialType: 'adminSession',
+            session: adminSession.session,
+        });
     }
 
     // user session
     const userSession = await validateSession(env, request, 'user');
     if (userSession.valid) {
-        return AUTHORIZED('user');
+        return AUTHORIZED('user', {
+            credentialType: 'userSession',
+            session: userSession.session,
+        });
     }
 
     // authCode
     if (!authCodeConfigured) {
-        return AUTHORIZED('user'); // 未配置用户认证，视为用户身份放行
+        return AUTHORIZED('user', { credentialType: 'anonymousUser' });
     }
 
     if (url) {
         const authCode = extractAuthCode(url, request);
         if (authCode && await verifyPassword(authCode, userAuthCode)) {
-            return AUTHORIZED('user');
+            return AUTHORIZED('user', { credentialType: 'authCode' });
         }
     }
 
-    return UNAUTHORIZED;
+    return unauthorized('unauthorized');
 }
 
 /**
@@ -98,7 +126,12 @@ export async function authenticate({
     authScope = AUTH_SCOPE.EITHER,
 }) {
     // 读取安全配置
-    const securityConfig = await fetchSecurityConfig(env);
+    let securityConfig;
+    try {
+        securityConfig = await fetchSecurityConfig(env, { throwOnError: true });
+    } catch {
+        return unauthorized('security_config_unavailable');
+    }
     const adminUsername = securityConfig.auth.admin.adminUsername;
     const adminPassword = securityConfig.auth.admin.adminPassword;
     const userAuthCode = securityConfig.auth.user.authCode;
@@ -110,7 +143,10 @@ export async function authenticate({
     const db = getDatabase(env);
     const tokenResult = await validateApiToken(request, db, requiredPermission);
     if (tokenResult.valid) {
-        return AUTHORIZED('admin');
+        return AUTHORIZED('admin', {
+            credentialType: 'apiToken',
+            token: tokenResult.token,
+        });
     }
 
     // --- 会话/凭据验证 ---
@@ -118,7 +154,7 @@ export async function authenticate({
     const userCtx = { env, request, url, authCodeConfigured, userAuthCode };
 
     if (authScope === AUTH_SCOPE.ADMIN) {
-        return (await checkAdmin(adminCtx)) || UNAUTHORIZED;
+        return (await checkAdmin(adminCtx)) || unauthorized('admin_not_configured_or_unauthorized');
     }
 
     if (authScope === AUTH_SCOPE.USER) {

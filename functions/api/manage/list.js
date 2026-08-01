@@ -4,6 +4,7 @@ import {
 } from '../../utils/indexManager.js';
 import { getDatabase } from '../../utils/databaseAdapter.js';
 import { createMetadataViewContext, serializeFileRecordForManagement } from '../../utils/metadata/metadataView.js';
+import { isPathAllowedForToken, requireCanonicalResourcePath } from '../../utils/auth/tokenPolicy.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -13,9 +14,20 @@ const corsHeaders = {
     'Access-Control-Max-Age': '86400',
 };
 
+export const LIST_MANAGE_ACTIONS = new Set([
+    'rebuild',
+    'merge-operations',
+    'delete-operations',
+    'index-storage-stats',
+    'info',
+]);
+
 export async function onRequest(context) {
     const { request, waitUntil } = context;
     const url = new URL(request.url);
+
+    const scopeError = validateListRequestScope(context, url);
+    if (scopeError) return scopeError;
 
     // 解析查询参数
     let start = parseInt(url.searchParams.get('start'), 10) || 0;
@@ -33,6 +45,13 @@ export async function onRequest(context) {
     let label = url.searchParams.get('label') || '';
     let fileType = url.searchParams.get('fileType') || '';
     let channelName = url.searchParams.get('channelName') || '';
+
+    if (url.searchParams.has('action') && !LIST_MANAGE_ACTIONS.has(action)) {
+        return new Response(JSON.stringify({ error: 'Unknown list action' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+    }
 
     // 处理搜索关键字
     if (search) {
@@ -198,13 +217,49 @@ export async function onRequest(context) {
     } catch (error) {
         console.error('Error in list-indexed API:', error);
         return new Response(JSON.stringify({
-            error: 'Internal server error',
-            message: error.message
+            error: 'Internal server error'
         }), {
             status: 500,
             headers: { "Content-Type": "application/json", ...corsHeaders }
         });
     }
+}
+
+export function validateListRequestScope(context, url) {
+    const auth = context.data?.auth;
+    if (auth?.credentialType !== 'apiToken') return null;
+
+    if (url.searchParams.has('action')) {
+        if (!auth.token.permissions.includes('manage')) {
+            return new Response('Forbidden: manage permission is required for list actions', {
+                status: 403,
+                headers: { 'Cache-Control': 'no-store' },
+            });
+        }
+        return null;
+    }
+
+    try {
+        const directory = requireCanonicalResourcePath(
+            url.searchParams.get('dir') || '',
+            { allowEmpty: true }
+        );
+        if (!isPathAllowedForToken(auth.token, directory)) {
+            throw new TypeError('Path outside token scope');
+        }
+        if (directory) {
+            url.searchParams.set('dir', directory);
+        } else {
+            url.searchParams.delete('dir');
+        }
+    } catch {
+        return new Response('Forbidden: invalid or unauthorized list path', {
+            status: 403,
+            headers: { 'Cache-Control': 'no-store' },
+        });
+    }
+
+    return null;
 }
 
 async function getAllFileRecords(env, dir) {

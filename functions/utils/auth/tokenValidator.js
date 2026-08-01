@@ -1,6 +1,7 @@
 // API Token权限验证工具函数
 import { getTokenData } from '../../api/manage/apiTokens.js';
 import { isExpired } from './tokenExpiration.js';
+import { normalizeTokenPolicy, publicTokenIdentity } from './tokenPolicy.js';
 
 /**
  * 验证API Token权限
@@ -30,10 +31,18 @@ export async function validateApiToken(request, db, requiredPermission) {
     }
 
     // 获取完整Token数据
-    const tokenData = await getTokenData(db, token);
+    const storedTokenData = await getTokenData(db, token);
     
-    if (!tokenData) {
+    if (!storedTokenData) {
         return { valid: false, error: '无效的Token' };
+    }
+
+    let tokenData;
+    try {
+        tokenData = normalizeTokenPolicy(storedTokenData);
+    } catch {
+        // Invalid persisted policy must never degrade to an unrestricted token.
+        return { valid: false, error: 'Token 权限配置无效' };
     }
 
     // 检查Token是否已过期
@@ -46,7 +55,10 @@ export async function validateApiToken(request, db, requiredPermission) {
         return { valid: false, error: `缺少${requiredPermission}权限` };
     }
 
-    return { valid: true };
+    return {
+        valid: true,
+        token: publicTokenIdentity(tokenData),
+    };
 }
 
 /**

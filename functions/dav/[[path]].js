@@ -50,7 +50,9 @@ async function getApiHeaders(env) {
             'system',
             null,
             false,
-            'internal'
+            'internal',
+            undefined,
+            true
         );
         token = tokenResult.token;
         tokenId = tokenResult.id;
@@ -71,8 +73,12 @@ async function getApiHeaders(env) {
             if (!tokenData.permissions.includes('manage')) {
                 tokenData.permissions.push('manage');
                 tokenData.updatedAt = new Date().toISOString();
-                await db.put('manage@sysConfig@security', JSON.stringify(settings));
             }
+            if (tokenData.allowFolderDelete !== true) {
+                tokenData.allowFolderDelete = true;
+                tokenData.updatedAt = new Date().toISOString();
+            }
+            await db.put('manage@sysConfig@security', JSON.stringify(settings));
         }
     }
 

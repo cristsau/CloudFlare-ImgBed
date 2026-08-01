@@ -35,6 +35,10 @@
 
 CloudFlare-ImgBed是一个兼容Docker和Serverless双栈部署，支持多种后端存储渠道的开源文件托管解决方案，不仅具备**上传**、**管理**、**读取**、**删除**等覆盖文件全生命周期的基础功能，还提供**身份认证**、**目录组织**、**内容审核**、**随机图**等能力以及完整的RESTful API与WebDAV支持，适合自建图床、静态站资源管理和轻量文件分发场景。详见[功能文档](https://cfbed.sanyue.de/guide/features.html)。
 
+> [!WARNING]
+>
+> 生产环境必须配置管理员用户名或密码；未配置时管理接口与管理员登录会拒绝访问。仅当环境变量明确设置 `dev_mode=true` 时，才保留无管理员凭据的本地开发兼容模式。受限 API Token 可配置 `allowedPrefixes`，旧 Token 未配置该字段时仍保持原有的全路径权限，请按计划轮换为最小权限 Token。API Token 必须使用标准 `/upload` 接口；由于 KV 无法原子消费一次性上传凭证，HuggingFace 浏览器直传仅保留给第一方交互会话。
+
 ![CloudFlare](readme/海报.png)
 
 # 2. [Document](https://cfbed.sanyue.de)
