@@ -335,7 +335,7 @@ test('fresh Telegram records without capability or message id are not misclassif
         Channel: 'TelegramNew',
         ChannelName: 'Telegram_env',
         TgChatId: '-100123',
-        TimeStamp: Date.now(),
+        TimeStamp: Date.parse('2026-08-01T08:31:00.000Z'),
     });
 
     const result = await deleteFile(
