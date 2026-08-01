@@ -66,7 +66,7 @@ export async function resolveDiscordCredentials(db, env, metadata = {}) {
     return {
       source: 'config',
       botToken: channel.botToken,
-      channelId: channel.channelId,
+      channelId: metadata.DiscordChannelId || channel.channelId,
       proxyUrl: channel.proxyUrl || '',
       messageId: metadata.DiscordMessageId,
     };
@@ -74,7 +74,7 @@ export async function resolveDiscordCredentials(db, env, metadata = {}) {
 
   return missingCredentials({
     botToken: '',
-    channelId: '',
+    channelId: metadata.DiscordChannelId || '',
     proxyUrl: '',
     messageId: metadata.DiscordMessageId,
   });

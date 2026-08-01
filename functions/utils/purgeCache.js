@@ -1,33 +1,59 @@
 import { fetchOthersConfig } from "./sysConfig.js";
 
-let othersConfig = {};
-let cfZoneId = "";
-let cfEmail = "";
-let cfApiKey = "";
-
 export async function purgeCFCache(env, cdnUrl) {
-    try {
-        // 读取其他设置
-        othersConfig = await fetchOthersConfig(env);
-        cfZoneId = othersConfig.cloudflareApiToken.CF_ZONE_ID;
-        cfEmail = othersConfig.cloudflareApiToken.CF_EMAIL;
-        cfApiKey = othersConfig.cloudflareApiToken.CF_API_KEY;
+    const result = {
+        cacheInvalidated: false,
+        cachePurgeConfigured: false,
+        cachePurgeAttempted: false,
+        cachePurgeSucceeded: false,
+        localCacheInvalidated: false,
+    };
 
-        // 如果没有配置Cloudflare API，跳过缓存清除
-        if (!cfZoneId || !cfEmail || !cfApiKey) {
-            return;
+    // Cache API deletion is exact but data-center local. Attempt it even when
+    // account-level Cloudflare purge credentials are not configured.
+    try {
+        if (typeof caches !== 'undefined' && caches.default?.delete) {
+            result.localCacheInvalidated = await caches.default.delete(new Request(cdnUrl));
+        }
+    } catch (error) {
+        console.error('Failed to delete exact URL from local cache:', error.message || error);
+    }
+
+    try {
+        const othersConfig = await fetchOthersConfig(env);
+        const cfZoneId = othersConfig.cloudflareApiToken?.CF_ZONE_ID;
+        const cfEmail = othersConfig.cloudflareApiToken?.CF_EMAIL;
+        const cfApiKey = othersConfig.cloudflareApiToken?.CF_API_KEY;
+        result.cachePurgeConfigured = Boolean(cfZoneId && cfEmail && cfApiKey);
+
+        if (!result.cachePurgeConfigured) {
+            result.cacheInvalidated = result.localCacheInvalidated;
+            return result;
         }
 
-        // 清除CDN缓存
+        result.cachePurgeAttempted = true;
         const options = {
             method: 'POST',
             headers: {'Content-Type': 'application/json', 'X-Auth-Email': `${cfEmail}`, 'X-Auth-Key': `${cfApiKey}`},
-            body: `{"files":["${ cdnUrl }"]}`
+            body: JSON.stringify({ files: [cdnUrl] }),
         };
-        await fetch(`https://api.cloudflare.com/client/v4/zones/${ cfZoneId }/purge_cache`, options);
+        const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${cfZoneId}/purge_cache`, options);
+        let responseData = null;
+        try {
+            responseData = await response.json();
+        } catch {
+            responseData = null;
+        }
+        result.cachePurgeSucceeded = response.ok && responseData?.success === true;
+        if (!result.cachePurgeSucceeded) {
+            console.error('Cloudflare cache purge failed:', response.status);
+        }
     } catch (error) {
         console.error('Failed to purge CF cache:', error.message || error);
     }
+
+    result.cacheInvalidated = result.cachePurgeSucceeded || result.localCacheInvalidated;
+    return result;
 }
 
 export async function purgeRandomFileListCache(origin, ...dirs) {

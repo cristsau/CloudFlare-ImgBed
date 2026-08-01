@@ -1240,6 +1240,7 @@ export async function uploadLargeFileToTelegram(context, file, fullId, metadata,
                 index: i,
                 fileId: chunkInfo.file_id,
                 messageId: chunkInfo.message_id,
+                uploadTime: Date.now(),
                 size: chunkInfo.file_size,
                 fileName: chunkFileName
             });
@@ -1256,6 +1257,7 @@ export async function uploadLargeFileToTelegram(context, file, fullId, metadata,
         metadata.Channel = "TelegramNew";
         metadata.ChannelName = tgChannel.name;
         metadata.TgChatId = String(tgChatId);
+        metadata.DeleteCapability = 'telegram-message-v1';
         metadata.IsChunked = true;
         metadata.TotalChunks = totalChunks;
         metadata.FileSize = (fileSize / 1024 / 1024).toFixed(2);

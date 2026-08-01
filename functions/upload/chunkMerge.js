@@ -451,6 +451,7 @@ async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metad
             index: chunk.index,
             fileId: chunk.uploadResult.fileId,
             messageId: chunk.uploadResult.messageId,
+            uploadTime: chunk.uploadResult.uploadTime,
             size: chunk.uploadResult.size,
             fileName: chunk.uploadResult.fileName
         }));
@@ -462,6 +463,7 @@ async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metad
         metadata.Channel = "TelegramNew";
         metadata.ChannelName = tgChannel.name;
         metadata.TgChatId = String(tgChannel.chatId);
+        metadata.DeleteCapability = 'telegram-message-v1';
         metadata.IsChunked = true;
         metadata.TotalChunks = completedChunks.length;
         metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
@@ -536,6 +538,7 @@ async function mergeDiscordChunksInfo(context, uploadId, completedChunks, metada
         // 更新metadata
         metadata.Channel = "Discord";
         metadata.ChannelName = discordChannel.name;
+        metadata.DiscordChannelId = String(discordChannel.channelId);
         metadata.IsChunked = true;
         metadata.TotalChunks = completedChunks.length;
         metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);

@@ -7,7 +7,7 @@ import { buildWebDAVUrl, WebDAVAPI } from "../utils/storage/webdavAPI";
 import {
     setCommonHeaders, setRangeHeaders, handleHeadRequest, getFileContent, isTgChannel,
     returnWithCheck, return404, returnBlockImg, isDomainAllowed, FILE_CACHE_CONTROL,
-    resolveFileCacheControl
+    buildExternalRedirectResponse, resolveFileCacheControl
 } from './fileTools';
 import { getDatabase } from '../utils/databaseAdapter.js';
 import { authenticate, AUTH_SCOPE } from '../utils/auth/authCore.js';
@@ -111,8 +111,13 @@ export async function onRequest(context) {  // Contents of context object
 
     /* 外链渠道 */
     if (imgRecord.metadata?.Channel === 'External') {
-        // 直接重定向到外链
-        return Response.redirect(imgRecord.metadata?.ExternalLink, 302);
+        // 直接重定向到外链；NAV 笔记路径仍须服从 no-store，不能让
+        // redirect 绕过统一的可撤销缓存策略。
+        return buildExternalRedirectResponse(
+            imgRecord.metadata?.ExternalLink,
+            fileId,
+            context.fileAccess?.cacheControl
+        );
     }
 
     /* Telegram及Telegraph渠道 */

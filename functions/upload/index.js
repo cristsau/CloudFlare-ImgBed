@@ -666,6 +666,7 @@ async function uploadFileToDiscord(context, fullId, metadata, returnLink) {
         metadata.ChannelName = discordChannel.name || "Discord_env";
         metadata.FileSize = (fileInfo.file_size / 1024 / 1024).toFixed(2);
         metadata.DiscordMessageId = fileInfo.message_id;
+        metadata.DiscordChannelId = String(discordChannel.channelId);
         // 注意：不存储 DiscordAttachmentUrl，因为 Discord 附件 URL 会在约24小时后过期
         // 读取时会通过 API 获取新的 URL
 

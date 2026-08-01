@@ -4,7 +4,10 @@ import { removeFileFromIndex, batchRemoveFilesFromIndex } from "../../../utils/i
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { DiscordAPI } from '../../../utils/storage/discordAPI.js';
 import { HuggingFaceAPI } from '../../../utils/storage/huggingfaceAPI.js';
-import { TelegramAPI } from '../../../utils/storage/telegramAPI.js';
+import {
+    TELEGRAM_DELETE_CAPABILITY,
+    TelegramAPI,
+} from '../../../utils/storage/telegramAPI.js';
 import { WebDAVAPI } from '../../../utils/storage/webdavAPI.js';
 import {
     resolveDiscordCredentials,
@@ -111,9 +114,10 @@ export async function onRequest(context) {
             });
 
         } catch (e) {
+            console.error('Delete folder failed:', e);
             return new Response(JSON.stringify({
                 success: false,
-                error: e.message
+                error: 'Delete folder failed'
             }), {
                 status: 400,
                 headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -141,6 +145,11 @@ export async function onRequest(context) {
             detached: result.detached === true,
             legacy: result.legacy === true,
             alreadyMissing: result.alreadyMissing === true,
+            cacheInvalidated: result.cacheInvalidated === true,
+            cachePurgeConfigured: result.cachePurgeConfigured === true,
+            cachePurgeAttempted: result.cachePurgeAttempted === true,
+            cachePurgeSucceeded: result.cachePurgeSucceeded === true,
+            localCacheInvalidated: result.localCacheInvalidated === true,
         }), {
             headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
@@ -217,6 +226,10 @@ function canTokenAccessDeletePath(context, fileId) {
 }
 
 const TELEGRAM_DELETE_WINDOW_MS = 48 * 60 * 60 * 1000;
+// This cutoff only covers the short rollout window before every new upload
+// started declaring DeleteCapability. Capability-bearing records still fail
+// closed when their message locator is missing, regardless of timestamp.
+const TELEGRAM_DELETE_CAPABILITY_CUTOFF_MS = Date.parse('2026-08-01T08:30:00.000Z');
 
 // 删除单个文件的核心函数。源存储删除必须先成功；除明确标记的
 // legacy/detach 情况外，任何 provider 失败都不得删除数据库记录。
@@ -229,12 +242,14 @@ export async function deleteFile(env, fileId, cdnUrl, url, dependencies = {}) {
         // 如果文件记录不存在，直接返回成功（幂等删除）
         if (isMissingStoredFile(img)) {
             console.warn(`File ${fileId} not found in database, skipping delete`);
+            const cacheResult = await purgeCFCache(env, cdnUrl);
             return {
                 success: true,
                 sourceDeleted: false,
                 detached: false,
                 legacy: false,
                 alreadyMissing: true,
+                ...cacheResult,
             };
         }
 
@@ -249,7 +264,7 @@ export async function deleteFile(env, fileId, cdnUrl, url, dependencies = {}) {
         await db.delete(fileId);
 
         // 清除CDN缓存
-        await purgeCFCache(env, cdnUrl);
+        const cacheResult = await purgeCFCache(env, cdnUrl);
 
         // 清除 api/randomFileList 等API缓存
         const normalizedFolder = fileId.split('/').slice(0, -1).join('/');
@@ -262,6 +277,7 @@ export async function deleteFile(env, fileId, cdnUrl, url, dependencies = {}) {
             detached: sourceResult.detached === true,
             legacy: sourceResult.legacy === true,
             alreadyMissing: false,
+            ...cacheResult,
         };
     } catch (e) {
         console.error('Delete file failed:', e);
@@ -287,7 +303,7 @@ export async function deleteSourceFile(env, img, fileId) {
     }
 
     if (channel === 'Discord') {
-        return (await deleteDiscordFile(env, img)) ? sourceDeleted() : deleteFailure();
+        return await deleteDiscordSource(env, img);
     }
 
     if (channel === 'HuggingFace') {
@@ -317,13 +333,20 @@ export async function deleteSourceFile(env, img, fileId) {
 }
 
 async function deleteTelegramFile(env, img) {
-    const { messageIds, hasMissingMessageIds } = getTelegramMessageIds(img);
+    const { messages, hasMissingMessageIds } = getTelegramMessages(img);
+    const isKnownLegacy = isKnownLegacyTelegramRecord(img.metadata);
 
-    // Records created before TgMessageId support cannot be mapped back to a
-    // Telegram message. Preserve legacy delete compatibility, but report that
-    // this is detach-only and never claim physical source deletion.
-    if (messageIds.length === 0) {
-        return detachedSource(true);
+    // Capability-aware records must always contain every required locator. A
+    // missing ID there means corruption, not legacy data, and must fail closed.
+    // Only records provably older than the rollout cutoff may detach without IDs.
+    if (hasMissingMessageIds) {
+        if (img.metadata?.DeleteCapability === TELEGRAM_DELETE_CAPABILITY || !isKnownLegacy) {
+            console.error('Telegram delete refused: message capability is incomplete');
+            return deleteFailure();
+        }
+    }
+    if (messages.length === 0) {
+        return isKnownLegacy ? detachedSource(true) : deleteFailure();
     }
 
     const db = getDatabase(env);
@@ -334,10 +357,10 @@ async function deleteTelegramFile(env, img) {
     }
 
     const telegramAPI = new TelegramAPI(credentials.botToken, credentials.proxyUrl || '');
-    let detachOnly = hasMissingMessageIds;
+    let detachOnly = hasMissingMessageIds && isKnownLegacy;
 
-    for (const messageId of messageIds) {
-        const result = await telegramAPI.deleteMessage(credentials.chatId, messageId);
+    for (const message of messages) {
+        const result = await telegramAPI.deleteMessage(credentials.chatId, message.messageId);
         if (result.deleted) {
             continue;
         }
@@ -346,7 +369,7 @@ async function deleteTelegramFile(env, img) {
         // that permanent lifecycle limitation may degrade to detach-only;
         // auth, permission, rate-limit and transport failures remain hard
         // failures so the metadata is retained for a safe retry.
-        if (result.nonDeletable && isOutsideTelegramDeleteWindow(img.metadata)) {
+        if (result.nonDeletable && isOutsideTelegramDeleteWindow(message.uploadTime)) {
             detachOnly = true;
             continue;
         }
@@ -357,30 +380,31 @@ async function deleteTelegramFile(env, img) {
     return detachOnly ? detachedSource(true) : sourceDeleted();
 }
 
-function getTelegramMessageIds(img) {
+function getTelegramMessages(img) {
     if (img.metadata?.IsChunked !== true) {
         const messageId = normalizeTelegramMessageId(img.metadata?.TgMessageId);
         return {
-            messageIds: messageId === null ? [] : [messageId],
+            messages: messageId === null ? [] : [{
+                messageId,
+                uploadTime: normalizeUploadTime(img.metadata?.TimeStamp),
+            }],
             hasMissingMessageIds: messageId === null,
         };
     }
 
-    let chunks = [];
-    try {
-        chunks = typeof img.value === 'string' ? JSON.parse(img.value) : [];
-    } catch {
-        chunks = [];
+    const chunks = parseStoredChunks(img.value);
+
+    if (chunks.length === 0) {
+        return { messages: [], hasMissingMessageIds: true };
     }
 
-    if (!Array.isArray(chunks) || chunks.length === 0) {
-        return { messageIds: [], hasMissingMessageIds: true };
-    }
-
-    const normalized = chunks.map((chunk) => normalizeTelegramMessageId(chunk?.messageId));
+    const normalized = chunks.map((chunk) => ({
+        messageId: normalizeTelegramMessageId(chunk?.messageId),
+        uploadTime: normalizeUploadTime(chunk?.uploadTime ?? img.metadata?.TimeStamp),
+    }));
     return {
-        messageIds: [...new Set(normalized.filter((messageId) => messageId !== null))],
-        hasMissingMessageIds: normalized.some((messageId) => messageId === null),
+        messages: deduplicateMessages(normalized.filter((message) => message.messageId !== null)),
+        hasMissingMessageIds: normalized.some((message) => message.messageId === null),
     };
 }
 
@@ -389,11 +413,96 @@ function normalizeTelegramMessageId(value) {
     return Number.isSafeInteger(normalized) && normalized > 0 ? normalized : null;
 }
 
-function isOutsideTelegramDeleteWindow(metadata = {}) {
-    const uploadedAt = Number(metadata.TimeStamp);
-    return Number.isFinite(uploadedAt)
-        && uploadedAt > 0
+function normalizeUploadTime(value) {
+    const uploadedAt = Number(value);
+    return Number.isFinite(uploadedAt) && uploadedAt > 0 ? uploadedAt : null;
+}
+
+function isOutsideTelegramDeleteWindow(uploadedAt) {
+    return uploadedAt !== null
         && Date.now() - uploadedAt >= TELEGRAM_DELETE_WINDOW_MS;
+}
+
+function isKnownLegacyTelegramRecord(metadata = {}) {
+    if (metadata.DeleteCapability !== undefined && metadata.DeleteCapability !== null) {
+        return false;
+    }
+    const uploadedAt = normalizeUploadTime(metadata.TimeStamp);
+    return uploadedAt !== null && uploadedAt < TELEGRAM_DELETE_CAPABILITY_CUTOFF_MS;
+}
+
+function deduplicateMessages(messages) {
+    const seen = new Set();
+    return messages.filter((message) => {
+        if (seen.has(message.messageId)) return false;
+        seen.add(message.messageId);
+        return true;
+    });
+}
+
+async function deleteDiscordSource(env, img) {
+    const { messageIds, hasMissingMessageIds } = getDiscordMessageIds(img);
+
+    // A chunk record with missing locators is unsafe to partially detach: keep
+    // KV metadata so it can be repaired or explicitly handled later.
+    if (messageIds.length === 0 || hasMissingMessageIds) {
+        console.error('Discord delete refused: chunk message ids are incomplete');
+        return deleteFailure();
+    }
+
+    const db = getDatabase(env);
+    const credentials = await resolveDiscordCredentials(db, env, img.metadata);
+    if (!credentials.botToken || !credentials.channelId) {
+        console.error('Discord delete refused: channel credentials are unavailable');
+        return deleteFailure();
+    }
+
+    const discordAPI = new DiscordAPI(credentials.botToken);
+    for (const messageId of messageIds) {
+        const success = await discordAPI.deleteMessage(credentials.channelId, messageId);
+        if (!success) {
+            // Keep the registry after partial deletion. Retry is safe because
+            // DiscordAPI treats an already missing message (404) as success.
+            return deleteFailure();
+        }
+    }
+
+    return sourceDeleted();
+}
+
+function getDiscordMessageIds(img) {
+    if (img.metadata?.IsChunked !== true) {
+        const messageId = normalizeDiscordMessageId(img.metadata?.DiscordMessageId);
+        return {
+            messageIds: messageId === null ? [] : [messageId],
+            hasMissingMessageIds: messageId === null,
+        };
+    }
+
+    const chunks = parseStoredChunks(img.value);
+    if (chunks.length === 0) {
+        return { messageIds: [], hasMissingMessageIds: true };
+    }
+
+    const normalized = chunks.map((chunk) => normalizeDiscordMessageId(chunk?.messageId));
+    return {
+        messageIds: [...new Set(normalized.filter((messageId) => messageId !== null))],
+        hasMissingMessageIds: normalized.some((messageId) => messageId === null),
+    };
+}
+
+function parseStoredChunks(value) {
+    try {
+        const chunks = typeof value === 'string' ? JSON.parse(value) : [];
+        return Array.isArray(chunks) ? chunks : [];
+    } catch {
+        return [];
+    }
+}
+
+function normalizeDiscordMessageId(value) {
+    const normalized = String(value ?? '').trim();
+    return /^\d+$/.test(normalized) && normalized !== '0' ? normalized : null;
 }
 
 function sourceDeleted() {
@@ -451,33 +560,6 @@ async function deleteS3File(env, img) {
         return false;
     }
 }
-
-// 删除 Discord 渠道的图片（删除 Discord 消息）
-async function deleteDiscordFile(env, img) {
-    const db = getDatabase(env);
-    const discordCredentials = await resolveDiscordCredentials(db, env, img.metadata);
-    const botToken = discordCredentials.botToken;
-    const channelId = discordCredentials.channelId;
-    const messageId = discordCredentials.messageId;
-
-    if (!botToken || !channelId || !messageId) {
-        console.warn('Discord file missing required metadata for deletion');
-        return false;
-    }
-
-    try {
-        const discordAPI = new DiscordAPI(botToken);
-        const success = await discordAPI.deleteMessage(channelId, messageId);
-        if (!success) {
-            console.error('Discord Delete Failed: API returned false');
-        }
-        return success;
-    } catch (error) {
-        console.error("Discord Delete Failed:", error);
-        return false;
-    }
-}
-
 
 // 删除 HuggingFace 渠道的图片
 async function deleteHuggingFaceFile(env, img) {

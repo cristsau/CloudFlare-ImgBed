@@ -1,6 +1,8 @@
 /**
  * Telegram API 封装类
  */
+export const TELEGRAM_DELETE_CAPABILITY = 'telegram-message-v1';
+
 export class TelegramAPI {
     constructor(botToken, proxyUrl = '') {
         this.botToken = botToken;
@@ -197,5 +199,6 @@ export function applyTelegramUploadIdentity(metadata, fileInfo, chatId) {
     metadata.TgFileId = fileInfo.file_id;
     metadata.TgMessageId = fileInfo.message_id;
     metadata.TgChatId = String(chatId);
+    metadata.DeleteCapability = TELEGRAM_DELETE_CAPABILITY;
     return metadata;
 }

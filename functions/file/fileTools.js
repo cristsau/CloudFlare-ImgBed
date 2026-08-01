@@ -64,6 +64,16 @@ export function resolveFileCacheControl(fileId, fallback = FILE_CACHE_CONTROL.PU
     return fallback || FILE_CACHE_CONTROL.PUBLIC;
 }
 
+export function buildExternalRedirectResponse(externalLink, fileId, fallbackCacheControl) {
+    return new Response(null, {
+        status: 302,
+        headers: {
+            Location: externalLink,
+            'Cache-Control': resolveFileCacheControl(fileId, fallbackCacheControl),
+        },
+    });
+}
+
 // 公共响应头设置函数
 export function setCommonHeaders(headers, encodedFileName, fileType, cacheControl = FILE_CACHE_CONTROL.PUBLIC) {
     headers.set('Content-Disposition', `inline; filename="${encodedFileName}"; filename*=UTF-8''${encodedFileName}`);
