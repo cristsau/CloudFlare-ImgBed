@@ -2,6 +2,7 @@ import { fetchSecurityConfig } from "../../utils/sysConfig.js";
 import { verifyPassword, rehashIfNeeded } from "../../utils/auth/passwordHash.js";
 import { createSession } from "../../utils/auth/sessionManager.js";
 import { getDatabase } from "../../utils/databaseAdapter.js";
+import { isExplicitDevelopmentMode } from "../../utils/auth/authCore.js";
 
 export async function onRequestPost(context) {
     const { request, env } = context;
@@ -26,8 +27,16 @@ export async function onRequestPost(context) {
     const passwordConfigured = !!(adminPassword && adminPassword.trim());
     const adminConfigured = usernameConfigured || passwordConfigured;
 
-    // 管理员未配置，无需认证，直接创建会话
+    // Only an explicitly labelled development environment may bootstrap an
+    // administrator session without credentials. Production fails closed.
     if (!adminConfigured) {
+        if (!isExplicitDevelopmentMode(env)) {
+            return new Response(JSON.stringify({ error: 'Administrator credentials are not configured' }), {
+                status: 503,
+                headers: { 'Content-Type': 'application/json' },
+            });
+        }
+
         const { cookie } = await createSession(env, 'admin');
         return new Response(JSON.stringify({ success: true }), {
             status: 200,

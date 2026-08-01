@@ -1,5 +1,11 @@
 import { getDatabase } from '../../utils/databaseAdapter.js';
 import { filterAutoDeleteTokens } from '../../utils/auth/tokenExpiration.js';
+import {
+    assertFolderDeletePolicy,
+    normalizeAllowedPrefixes,
+    normalizeAllowFolderDelete,
+    normalizePermissions,
+} from '../../utils/auth/tokenPolicy.js';
 
 export async function onRequest(context) {
     // API Token管理，支持创建、删除、列出Token
@@ -25,7 +31,15 @@ export async function onRequest(context) {
     // POST - 创建新Token
     if (method === 'POST') {
         const body = await request.json()
-        const { name, permissions, owner, expiresAt = null, autoDelete = false } = body
+        const {
+            name,
+            permissions,
+            owner,
+            expiresAt = null,
+            autoDelete = false,
+            allowedPrefixes,
+            allowFolderDelete = false,
+        } = body
 
         if (!name || !permissions || !owner) {
             return new Response(JSON.stringify({ error: '缺少必要参数' }), {
@@ -36,7 +50,25 @@ export async function onRequest(context) {
             })
         }
 
-        const token = await createApiToken(db, name, permissions, owner, expiresAt, autoDelete)
+        let token;
+        try {
+            token = await createApiToken(
+                db,
+                name,
+                permissions,
+                owner,
+                expiresAt,
+                autoDelete,
+                'user',
+                allowedPrefixes,
+                allowFolderDelete
+            )
+        } catch (error) {
+            return new Response(JSON.stringify({ error: error.message }), {
+                status: 400,
+                headers: { 'content-type': 'application/json' },
+            })
+        }
         return new Response(JSON.stringify(token), {
             headers: {
                 'content-type': 'application/json',
@@ -68,7 +100,14 @@ export async function onRequest(context) {
     // PUT - 更新Token权限
     if (method === 'PUT') {
         const body = await request.json()
-        const { tokenId, permissions, expiresAt = null, autoDelete = false } = body
+        const {
+            tokenId,
+            permissions,
+            expiresAt = null,
+            autoDelete = false,
+            allowedPrefixes,
+            allowFolderDelete,
+        } = body
 
         if (!tokenId || !permissions) {
             return new Response(JSON.stringify({ error: '缺少必要参数' }), {
@@ -79,7 +118,23 @@ export async function onRequest(context) {
             })
         }
 
-        const result = await updateApiToken(db, tokenId, permissions, expiresAt, autoDelete)
+        let result;
+        try {
+            result = await updateApiToken(
+                db,
+                tokenId,
+                permissions,
+                expiresAt,
+                autoDelete,
+                allowedPrefixes,
+                allowFolderDelete
+            )
+        } catch (error) {
+            return new Response(JSON.stringify({ error: error.message }), {
+                status: 400,
+                headers: { 'content-type': 'application/json' },
+            })
+        }
         return new Response(JSON.stringify(result), {
             headers: {
                 'content-type': 'application/json',
@@ -111,7 +166,9 @@ async function getApiTokens(db) {
                 updatedAt: token.updatedAt,
                 token: token.token,
                 expiresAt: token.expiresAt ?? null,
-                autoDelete: token.autoDelete ?? false
+                autoDelete: token.autoDelete ?? false,
+                allowedPrefixes: token.allowedPrefixes ?? null,
+                allowFolderDelete: token.allowFolderDelete ?? false
             }
         })
     
@@ -136,14 +193,26 @@ async function getApiTokens(db) {
         updatedAt: t.updatedAt,
         token: t.token.substr(0, 15) + '...', // 只显示前15位
         expiresAt: t.expiresAt,
-        autoDelete: t.autoDelete
+        autoDelete: t.autoDelete,
+        allowedPrefixes: t.allowedPrefixes,
+        allowFolderDelete: t.allowFolderDelete
     }))
     
     return { tokens: tokenList }
 }
 
 // 创建新的API Token
-export async function createApiToken(db, name, permissions, owner, expiresAt = null, autoDelete = false, type = 'user') {
+export async function createApiToken(
+    db,
+    name,
+    permissions,
+    owner,
+    expiresAt = null,
+    autoDelete = false,
+    type = 'user',
+    allowedPrefixes = undefined,
+    allowFolderDelete = false
+) {
     const settingsStr = await db.get('manage@sysConfig@security')
     const settings = settingsStr ? JSON.parse(settingsStr) : {}
     
@@ -155,17 +224,29 @@ export async function createApiToken(db, name, permissions, owner, expiresAt = n
     const token = generateApiToken()
     const now = new Date().toISOString()
     
+    const normalizedPermissions = normalizePermissions(permissions)
+    const normalizedPrefixes = normalizeAllowedPrefixes(allowedPrefixes)
+    const normalizedFolderDelete = normalizeAllowFolderDelete(allowFolderDelete)
+    assertFolderDeletePolicy(normalizedPermissions, normalizedFolderDelete)
+
     const tokenData = {
         id: tokenId,
         name,
         token,
         owner,
-        permissions,
+        permissions: normalizedPermissions,
         type,
         createdAt: now,
         updatedAt: now,
         expiresAt: expiresAt ?? null,
-        autoDelete: autoDelete === true
+        autoDelete: autoDelete === true,
+        allowFolderDelete: normalizedFolderDelete
+    }
+
+    // Do not persist this field for legacy callers. Missing means unrestricted;
+    // an explicit [] means the token has no path access.
+    if (allowedPrefixes !== undefined && allowedPrefixes !== null) {
+        tokenData.allowedPrefixes = normalizedPrefixes
     }
     
     settings.apiTokens.tokens[tokenId] = tokenData
@@ -178,11 +259,13 @@ export async function createApiToken(db, name, permissions, owner, expiresAt = n
         name,
         token,
         owner,
-        permissions,
+        permissions: normalizedPermissions,
         createdAt: now,
         updatedAt: now,
         expiresAt: tokenData.expiresAt,
-        autoDelete: tokenData.autoDelete
+        autoDelete: tokenData.autoDelete,
+        allowedPrefixes: tokenData.allowedPrefixes ?? null,
+        allowFolderDelete: tokenData.allowFolderDelete
     }
 }
 
@@ -204,7 +287,15 @@ export async function deleteApiToken(db, tokenId) {
 }
 
 // 更新API Token
-async function updateApiToken(db, tokenId, permissions, expiresAt = null, autoDelete = false) {
+async function updateApiToken(
+    db,
+    tokenId,
+    permissions,
+    expiresAt = null,
+    autoDelete = false,
+    allowedPrefixes = undefined,
+    allowFolderDelete = undefined
+) {
     const settingsStr = await db.get('manage@sysConfig@security')
     const settings = settingsStr ? JSON.parse(settingsStr) : {}
     
@@ -212,10 +303,27 @@ async function updateApiToken(db, tokenId, permissions, expiresAt = null, autoDe
         return { error: 'Token 不存在' }
     }
     
-    settings.apiTokens.tokens[tokenId].permissions = permissions
+    const normalizedPermissions = normalizePermissions(permissions)
+    const normalizedFolderDelete = allowFolderDelete === undefined
+        ? normalizeAllowFolderDelete(settings.apiTokens.tokens[tokenId].allowFolderDelete)
+        : normalizeAllowFolderDelete(allowFolderDelete)
+    assertFolderDeletePolicy(normalizedPermissions, normalizedFolderDelete)
+
+    settings.apiTokens.tokens[tokenId].permissions = normalizedPermissions
     settings.apiTokens.tokens[tokenId].updatedAt = new Date().toISOString()
     settings.apiTokens.tokens[tokenId].expiresAt = expiresAt ?? null
     settings.apiTokens.tokens[tokenId].autoDelete = autoDelete === true
+    if (allowedPrefixes !== undefined) {
+        const normalizedPrefixes = normalizeAllowedPrefixes(allowedPrefixes)
+        if (allowedPrefixes === null) {
+            delete settings.apiTokens.tokens[tokenId].allowedPrefixes
+        } else {
+            settings.apiTokens.tokens[tokenId].allowedPrefixes = normalizedPrefixes
+        }
+    }
+    if (allowFolderDelete !== undefined) {
+        settings.apiTokens.tokens[tokenId].allowFolderDelete = normalizedFolderDelete
+    }
     
     // 保存到数据库
     await db.put('manage@sysConfig@security', JSON.stringify(settings))
@@ -277,7 +385,10 @@ export async function getTokenData(db, token) {
                 createdAt: t.createdAt,
                 updatedAt: t.updatedAt,
                 expiresAt: t.expiresAt ?? null,
-                autoDelete: t.autoDelete ?? false
+                autoDelete: t.autoDelete ?? false,
+                allowedPrefixes: t.allowedPrefixes,
+                allowFolderDelete: t.allowFolderDelete ?? false,
+                type: t.type ?? 'user'
             }
         }
     }

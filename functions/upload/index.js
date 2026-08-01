@@ -1,4 +1,9 @@
-import { userAuthCheck, UnauthorizedResponse } from "../utils/auth/userAuth";
+import { UnauthorizedResponse } from "../utils/auth/userAuth";
+import { authenticate, AUTH_SCOPE } from "../utils/auth/authCore.js";
+import {
+    authorizeUploadFolder,
+    writeCanonicalUploadFolder,
+} from "../utils/auth/uploadPolicy.js";
 import { fetchUploadConfig, fetchSecurityConfig, fetchPageConfig } from "../utils/sysConfig";
 import {
     createResponse, getUploadIp, getIPAddress, resolveFileExt,
@@ -31,8 +36,29 @@ export async function onRequest(context) {  // Contents of context object
 
     // 鉴权
     const requiredPermission = 'upload';
-    if (!await userAuthCheck(env, url, request, requiredPermission)) {
+    const authResult = await authenticate({
+        env,
+        request,
+        url,
+        requiredPermission,
+        authScope: AUTH_SCOPE.USER,
+    });
+    if (!authResult.authorized) {
         return UnauthorizedResponse('Unauthorized');
+    }
+    context.data = context.data || {};
+    context.data.auth = authResult;
+
+    if (authResult.credentialType === 'apiToken') {
+        try {
+            const storageFolder = authorizeUploadFolder(
+                authResult,
+                url.searchParams.get('uploadFolder') || ''
+            );
+            writeCanonicalUploadFolder(url, storageFolder);
+        } catch {
+            return createResponse('Forbidden: invalid or unauthorized upload path', { status: 403 });
+        }
     }
 
     // 获得上传IP

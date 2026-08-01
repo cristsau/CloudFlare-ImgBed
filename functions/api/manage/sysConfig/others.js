@@ -41,11 +41,13 @@ export async function onRequest(context) {
             const tokenResult = await createApiToken(
                 db,
                 'WebDAV Internal Token',
-                ['list', 'upload', 'delete'],
+                ['list', 'upload', 'delete', 'manage'],
                 'system',
                 null,   // 不过期
                 false,  // 不自动删除
-                'internal'
+                'internal',
+                undefined,
+                true
             );
             settings.webDAV.internalToken = tokenResult.token;
             settings.webDAV.internalTokenId = tokenResult.id;
