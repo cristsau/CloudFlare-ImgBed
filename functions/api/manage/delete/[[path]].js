@@ -1,14 +1,16 @@
 import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
-import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
+import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache.js";
 import { removeFileFromIndex, batchRemoveFilesFromIndex } from "../../../utils/indexManager.js";
 import { getDatabase } from '../../../utils/databaseAdapter.js';
 import { DiscordAPI } from '../../../utils/storage/discordAPI.js';
 import { HuggingFaceAPI } from '../../../utils/storage/huggingfaceAPI.js';
+import { TelegramAPI } from '../../../utils/storage/telegramAPI.js';
 import { WebDAVAPI } from '../../../utils/storage/webdavAPI.js';
 import {
     resolveDiscordCredentials,
     resolveHuggingFaceCredentials,
     resolveS3Credentials,
+    resolveTelegramCredentials,
     resolveWebDAVCredentials,
 } from '../../../utils/metadata/channelCredentials.js';
 import { isPathAllowedForToken, normalizeResourcePath } from '../../../utils/auth/tokenPolicy.js';
@@ -41,6 +43,7 @@ export async function onRequest(context) {
 
             const deletedFiles = [];
             const failedFiles = [];
+            const detachedFiles = [];
 
             while (folderQueue.length > 0) {
                 const currentFolder = folderQueue.shift();
@@ -66,9 +69,16 @@ export async function onRequest(context) {
                     }
                     const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
-                    const success = await deleteFile(env, fileId, cdnUrl, url);
-                    if (success) {
+                    const result = await deleteFile(env, fileId, cdnUrl, url);
+                    if (result.success) {
                         deletedFiles.push(fileId);
+                        if (result.detached) {
+                            detachedFiles.push({
+                                fileId,
+                                sourceDeleted: false,
+                                legacy: result.legacy === true,
+                            });
+                        }
                     } else {
                         failedFiles.push(fileId);
                     }
@@ -92,9 +102,10 @@ export async function onRequest(context) {
             }
 
             return new Response(JSON.stringify({
-                success: true,
+                success: failedFiles.length === 0,
                 deleted: deletedFiles,
-                failed: failedFiles
+                failed: failedFiles,
+                detached: detachedFiles,
             }), {
                 headers: { 'Content-Type': 'application/json', ...corsHeaders }
             });
@@ -115,8 +126,8 @@ export async function onRequest(context) {
         const fileId = resolveDeletePath(params.path);
         const cdnUrl = `https://${url.hostname}/file/${fileId}`;
 
-        const success = await deleteFile(env, fileId, cdnUrl, url);
-        if (!success) {
+        const result = await deleteFile(env, fileId, cdnUrl, url);
+        if (!result.success) {
             throw new Error('Delete file failed');
         } else {
             // 从索引中删除文件
@@ -125,7 +136,11 @@ export async function onRequest(context) {
 
         return new Response(JSON.stringify({
             success: true,
-            fileId: fileId
+            fileId: fileId,
+            sourceDeleted: result.sourceDeleted === true,
+            detached: result.detached === true,
+            legacy: result.legacy === true,
+            alreadyMissing: result.alreadyMissing === true,
         }), {
             headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
@@ -201,8 +216,11 @@ function canTokenAccessDeletePath(context, fileId) {
     }
 }
 
-// 删除单个文件的核心函数
-async function deleteFile(env, fileId, cdnUrl, url) {
+const TELEGRAM_DELETE_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+// 删除单个文件的核心函数。源存储删除必须先成功；除明确标记的
+// legacy/detach 情况外，任何 provider 失败都不得删除数据库记录。
+export async function deleteFile(env, fileId, cdnUrl, url, dependencies = {}) {
     try {
         // 读取图片信息
         const db = getDatabase(env);
@@ -211,33 +229,19 @@ async function deleteFile(env, fileId, cdnUrl, url) {
         // 如果文件记录不存在，直接返回成功（幂等删除）
         if (isMissingStoredFile(img)) {
             console.warn(`File ${fileId} not found in database, skipping delete`);
-            return true;
+            return {
+                success: true,
+                sourceDeleted: false,
+                detached: false,
+                legacy: false,
+                alreadyMissing: true,
+            };
         }
 
-        // 如果是R2渠道的图片，需要删除R2中对应的图片
-        if (img.metadata?.Channel === 'CloudflareR2') {
-            const R2DataBase = env.img_r2;
-            await R2DataBase.delete(fileId);
-        }
-
-        // S3 渠道的图片，需要删除S3中对应的图片
-        if (img.metadata?.Channel === 'S3') {
-            await deleteS3File(env, img);
-        }
-
-        // Discord 渠道的图片，需要删除 Discord 中对应的消息
-        if (img.metadata?.Channel === 'Discord') {
-            await deleteDiscordFile(env, img);
-        }
-
-        // HuggingFace 渠道的图片，需要删除 HuggingFace 中对应的文件
-        if (img.metadata?.Channel === 'HuggingFace') {
-            await deleteHuggingFaceFile(env, img);
-        }
-
-        // WebDAV 渠道的图片，需要删除 WebDAV 中对应的文件
-        if (img.metadata?.Channel === 'WebDAV') {
-            await deleteWebDAVFile(env, img);
+        const deleteStoredSource = dependencies.deleteStoredSource || deleteSourceFile;
+        const sourceResult = await deleteStoredSource(env, img, fileId);
+        if (!sourceResult.success) {
+            return sourceResult;
         }
 
         // 删除数据库中的记录
@@ -252,11 +256,171 @@ async function deleteFile(env, fileId, cdnUrl, url) {
         await purgeRandomFileListCache(url.origin, normalizedFolder);
         await purgePublicFileListCache(url.origin, normalizedFolder);
 
-        return true;
+        return {
+            success: true,
+            sourceDeleted: sourceResult.sourceDeleted === true,
+            detached: sourceResult.detached === true,
+            legacy: sourceResult.legacy === true,
+            alreadyMissing: false,
+        };
     } catch (e) {
         console.error('Delete file failed:', e);
-        return false;
+        return deleteFailure();
     }
+}
+
+// 按存储渠道删除源对象。返回值区分“真实删除”和“仅解除图床引用”，
+// 防止 provider 失败被误报为成功。
+export async function deleteSourceFile(env, img, fileId) {
+    const channel = img.metadata?.Channel;
+
+    if (channel === 'CloudflareR2') {
+        if (!env.img_r2 || typeof env.img_r2.delete !== 'function') {
+            return deleteFailure();
+        }
+        await env.img_r2.delete(fileId);
+        return sourceDeleted();
+    }
+
+    if (channel === 'S3') {
+        return (await deleteS3File(env, img)) ? sourceDeleted() : deleteFailure();
+    }
+
+    if (channel === 'Discord') {
+        return (await deleteDiscordFile(env, img)) ? sourceDeleted() : deleteFailure();
+    }
+
+    if (channel === 'HuggingFace') {
+        return (await deleteHuggingFaceFile(env, img)) ? sourceDeleted() : deleteFailure();
+    }
+
+    if (channel === 'WebDAV') {
+        return (await deleteWebDAVFile(env, img)) ? sourceDeleted() : deleteFailure();
+    }
+
+    if (channel === 'Telegram' || channel === 'TelegramNew') {
+        return await deleteTelegramFile(env, img);
+    }
+
+    // External and pre-channel Telegraph records never represented an object
+    // owned by this deployment. Removing their registry entry is explicit
+    // detach-only behavior, not a claim that the remote source was deleted.
+    if (channel === 'External') {
+        return detachedSource(false);
+    }
+    if (channel === undefined || channel === null || channel === '') {
+        return detachedSource(true);
+    }
+
+    console.error('Delete refused for unsupported storage channel:', channel);
+    return deleteFailure();
+}
+
+async function deleteTelegramFile(env, img) {
+    const { messageIds, hasMissingMessageIds } = getTelegramMessageIds(img);
+
+    // Records created before TgMessageId support cannot be mapped back to a
+    // Telegram message. Preserve legacy delete compatibility, but report that
+    // this is detach-only and never claim physical source deletion.
+    if (messageIds.length === 0) {
+        return detachedSource(true);
+    }
+
+    const db = getDatabase(env);
+    const credentials = await resolveTelegramCredentials(db, env, img.metadata);
+    if (!credentials.botToken || !credentials.chatId) {
+        console.error('Telegram delete refused: channel credentials are unavailable');
+        return deleteFailure();
+    }
+
+    const telegramAPI = new TelegramAPI(credentials.botToken, credentials.proxyUrl || '');
+    let detachOnly = hasMissingMessageIds;
+
+    for (const messageId of messageIds) {
+        const result = await telegramAPI.deleteMessage(credentials.chatId, messageId);
+        if (result.deleted) {
+            continue;
+        }
+
+        // Telegram's Bot API cannot delete messages older than 48 hours. Only
+        // that permanent lifecycle limitation may degrade to detach-only;
+        // auth, permission, rate-limit and transport failures remain hard
+        // failures so the metadata is retained for a safe retry.
+        if (result.nonDeletable && isOutsideTelegramDeleteWindow(img.metadata)) {
+            detachOnly = true;
+            continue;
+        }
+
+        return deleteFailure();
+    }
+
+    return detachOnly ? detachedSource(true) : sourceDeleted();
+}
+
+function getTelegramMessageIds(img) {
+    if (img.metadata?.IsChunked !== true) {
+        const messageId = normalizeTelegramMessageId(img.metadata?.TgMessageId);
+        return {
+            messageIds: messageId === null ? [] : [messageId],
+            hasMissingMessageIds: messageId === null,
+        };
+    }
+
+    let chunks = [];
+    try {
+        chunks = typeof img.value === 'string' ? JSON.parse(img.value) : [];
+    } catch {
+        chunks = [];
+    }
+
+    if (!Array.isArray(chunks) || chunks.length === 0) {
+        return { messageIds: [], hasMissingMessageIds: true };
+    }
+
+    const normalized = chunks.map((chunk) => normalizeTelegramMessageId(chunk?.messageId));
+    return {
+        messageIds: [...new Set(normalized.filter((messageId) => messageId !== null))],
+        hasMissingMessageIds: normalized.some((messageId) => messageId === null),
+    };
+}
+
+function normalizeTelegramMessageId(value) {
+    const normalized = Number(value);
+    return Number.isSafeInteger(normalized) && normalized > 0 ? normalized : null;
+}
+
+function isOutsideTelegramDeleteWindow(metadata = {}) {
+    const uploadedAt = Number(metadata.TimeStamp);
+    return Number.isFinite(uploadedAt)
+        && uploadedAt > 0
+        && Date.now() - uploadedAt >= TELEGRAM_DELETE_WINDOW_MS;
+}
+
+function sourceDeleted() {
+    return {
+        success: true,
+        sourceDeleted: true,
+        detached: false,
+        legacy: false,
+    };
+}
+
+function detachedSource(legacy) {
+    return {
+        success: true,
+        sourceDeleted: false,
+        detached: true,
+        legacy: legacy === true,
+    };
+}
+
+function deleteFailure() {
+    return {
+        success: false,
+        sourceDeleted: false,
+        detached: false,
+        legacy: false,
+    };
 }
 
 // 删除 S3 渠道的图片
@@ -333,6 +497,12 @@ async function deleteHuggingFaceFile(env, img) {
         const huggingfaceAPI = new HuggingFaceAPI(token, repo, isPrivate);
         const success = await huggingfaceAPI.deleteFile(filePath, `Delete ${filePath}`);
         if (!success) {
+            // A previous attempt may have deleted the source before the KV
+            // mutation failed. Only a verified 404 is accepted as idempotent.
+            const verification = await huggingfaceAPI.getFileContent(filePath);
+            if (verification.status === 404) {
+                return true;
+            }
             console.error('HuggingFace Delete Failed: API returned false');
         }
         return success;

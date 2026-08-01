@@ -12,7 +12,7 @@ import {
 } from "./uploadTools";
 import { initializeChunkedUpload, handleChunkUpload, uploadLargeFileToTelegram, handleCleanupRequest } from "./chunkUpload";
 import { handleChunkMerge } from "./chunkMerge";
-import { TelegramAPI } from "../utils/storage/telegramAPI";
+import { applyTelegramUploadIdentity, TelegramAPI } from "../utils/storage/telegramAPI";
 import { DiscordAPI } from "../utils/storage/discordAPI";
 import { HuggingFaceAPI } from "../utils/storage/huggingfaceAPI";
 import { WebDAVAPI } from "../utils/storage/webdavAPI";
@@ -560,7 +560,7 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
             metadata.Channel = "TelegramNew";
             metadata.ChannelName = tgChannel.name;
 
-            metadata.TgFileId = id;
+            applyTelegramUploadIdentity(metadata, fileInfo, tgChatId);
             await db.put(fullId, "", {
                 metadata: metadata,
             });

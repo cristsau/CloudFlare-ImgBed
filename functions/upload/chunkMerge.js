@@ -450,6 +450,7 @@ async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metad
         const chunks = sortedChunks.map(chunk => ({
             index: chunk.index,
             fileId: chunk.uploadResult.fileId,
+            messageId: chunk.uploadResult.messageId,
             size: chunk.uploadResult.size,
             fileName: chunk.uploadResult.fileName
         }));
@@ -460,6 +461,7 @@ async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metad
         // 更新metadata
         metadata.Channel = "TelegramNew";
         metadata.ChannelName = tgChannel.name;
+        metadata.TgChatId = String(tgChannel.chatId);
         metadata.IsChunked = true;
         metadata.TotalChunks = completedChunks.length;
         metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);

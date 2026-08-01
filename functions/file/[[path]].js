@@ -6,7 +6,8 @@ import { HuggingFaceAPI } from "../utils/storage/huggingfaceAPI";
 import { buildWebDAVUrl, WebDAVAPI } from "../utils/storage/webdavAPI";
 import {
     setCommonHeaders, setRangeHeaders, handleHeadRequest, getFileContent, isTgChannel,
-    returnWithCheck, return404, returnBlockImg, isDomainAllowed, FILE_CACHE_CONTROL
+    returnWithCheck, return404, returnBlockImg, isDomainAllowed, FILE_CACHE_CONTROL,
+    resolveFileCacheControl
 } from './fileTools';
 import { getDatabase } from '../utils/databaseAdapter.js';
 import { authenticate, AUTH_SCOPE } from '../utils/auth/authCore.js';
@@ -50,6 +51,7 @@ export async function onRequest(context) {  // Contents of context object
     context.Referer = Referer;
 
     context.fileAccess = await buildFileAccessContext(context);
+    context.fileId = fileId;
 
     // 检查引用域名是否被允许
     if (!isDomainAllowed(context)) {
@@ -198,7 +200,7 @@ async function buildFileAccessContext(context) {
 }
 
 function getFileCacheControl(context) {
-    return context.fileAccess?.cacheControl;
+    return resolveFileCacheControl(context.fileId, context.fileAccess?.cacheControl);
 }
 
 function getChunkedFileCacheControl(context) {

@@ -623,6 +623,7 @@ async function uploadSingleChunkToTelegram(context, chunkData, chunkIndex, total
         return {
             success: true,
             fileId: chunkInfo.file_id,
+            messageId: chunkInfo.message_id,
             size: chunkInfo.file_size,
             fileName: chunkFileName,
             uploadTime: Date.now(),
@@ -1238,6 +1239,7 @@ export async function uploadLargeFileToTelegram(context, file, fullId, metadata,
             chunks.push({
                 index: i,
                 fileId: chunkInfo.file_id,
+                messageId: chunkInfo.message_id,
                 size: chunkInfo.file_size,
                 fileName: chunkFileName
             });
@@ -1253,6 +1255,7 @@ export async function uploadLargeFileToTelegram(context, file, fullId, metadata,
         // 所有分片上传成功，更新metadata
         metadata.Channel = "TelegramNew";
         metadata.ChannelName = tgChannel.name;
+        metadata.TgChatId = String(tgChatId);
         metadata.IsChunked = true;
         metadata.TotalChunks = totalChunks;
         metadata.FileSize = (fileSize / 1024 / 1024).toFixed(2);
